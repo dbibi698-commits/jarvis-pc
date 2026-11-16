@@ -152,23 +152,31 @@ public class JarvisPC {
 
     // ------------------------------------------------------------ pairing
 
+    // v1.8.1 FIX: age prottek poll-e /api/pair/request daka hoto — backend prottekbar
+    // NOTUN code banato, tai QR 4 second por por bodle jeto ar phone scan koreo confirm
+    // korte parto na (code bodle jeto). Ekhon: code ekbar nao, tarpor sudhu status poll
+    // koro; code 9.5 minute-e expire hole tobei notun code chao.
+    static long pairCodeAt = 0L;
+
     static void pairLoop() {
         while (running) {
             try {
                 if (!paired) {
-                    JSONObject r = postJson("/api/pair/request", new JSONObject()
-                            .put("pc_id", pcId).put("pc_name", pcName)
-                            .put("os", System.getProperty("os.name", "Windows")));
-                    if (r != null) {
-                        if (r.optBoolean("paired")) {
-                            onPaired(r.optString("install_id", ""), "");
-                        } else if (r.has("pair_code")) {
-                            pairCode = r.optString("pair_code", "");
-                            SwingUtilities.invokeLater(() -> showQr(pairCode));
+                    if (pairCode.isEmpty() || System.currentTimeMillis() - pairCodeAt > 9 * 60 * 1000 + 30 * 1000) {
+                        pairCode = "";
+                        JSONObject r = postJson("/api/pair/request", new JSONObject()
+                                .put("pc_id", pcId).put("pc_name", pcName)
+                                .put("os", System.getProperty("os.name", "Windows")));
+                        if (r != null) {
+                            if (r.optBoolean("paired")) {
+                                onPaired(r.optString("install_id", ""), "");
+                            } else if (r.has("pair_code")) {
+                                pairCode = r.optString("pair_code", "");
+                                pairCodeAt = System.currentTimeMillis();
+                                SwingUtilities.invokeLater(() -> showQr(pairCode));
+                            }
                         }
-                    }
-                    sleep(2000);
-                    if (!paired && !pairCode.isEmpty()) {
+                    } else {
                         JSONObject s = getJson("/api/pair/status?pc_id=" + enc(pcId) + "&code=" + enc(pairCode));
                         if (s != null && s.optBoolean("paired")) {
                             onPaired(s.optString("install_id", ""), s.optString("pc_token", ""));
