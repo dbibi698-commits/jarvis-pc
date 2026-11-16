@@ -78,6 +78,13 @@ public class JarvisPC {
 
     public static void main(String[] args) throws Exception {
         if (args.length > 0 && args[0].equals("--test")) { runSelfTest(); return; }
+        if (args.length > 0 && args[0].equals("--test-api")) {
+            loadConfig();
+            startLocalApi();
+            System.out.println("API UP on 127.0.0.1:18778");
+            try { Thread.sleep(90000); } catch (Exception ignored) {}
+            return;
+        }
         robot = new Robot();
         loadConfig();
         pcName = System.getenv("COMPUTERNAME");
@@ -86,6 +93,8 @@ public class JarvisPC {
         new Thread(JarvisPC::pairLoop, "pair-loop").start();
         new Thread(JarvisPC::inboxLoop, "inbox-loop").start();
         new Thread(JarvisPC::heartbeatLoop, "heartbeat-loop").start();
+        new Thread(JarvisPC::startLocalApi, "local-api").start();
+        new Thread(JarvisPC::startWebDashboard, "web-dash").start();
     }
 
     // ------------------------------------------------------------ config
@@ -307,7 +316,11 @@ public class JarvisPC {
                     sendToPhone("result", "⚠️ PC screen nite parlam na.", null);
                 }
             }
-            case "result" -> log("📱 Phone: " + text);
+            case "result" -> {
+                log("📱 Phone: " + text);
+                String clean = text.replaceAll("[*_#`]", "").replaceAll("\\n+", " ");
+                if (clean.length() > 4 && clean.length() < 600) speak(clean);
+            }
             case "sync" -> {
                 try {
                     JSONObject s = new JSONObject(text);
@@ -1147,6 +1160,11 @@ public class JarvisPC {
         });
         btnRow.add(apiKeyBtn);
         btnRow.add(voiceGenderBtn);
+        JButton webBtn = new JButton("🌐 Web Dashboard");
+        webBtn.addActionListener(e -> {
+            try { Desktop.getDesktop().browse(new URI("http://127.0.0.1:18777/")); } catch (Exception ex) { log("⚠️ Dashboard khulte parlam na: " + ex.getMessage()); }
+        });
+        btnRow.add(webBtn);
         btnRow.add(sendBtn);
         btnRow.add(recordBtn);
         btnRow.add(screenBtn);
@@ -1288,15 +1306,19 @@ public class JarvisPC {
 
     // v1.2: imageB64 dile Gemini Vision diye chhobi dekhe uttor dey (phone/PC screen)
     static String geminiChat(String userText, String audioB64, String imageB64) {
+        return geminiChat(userText, audioB64, imageB64, "audio/wav");
+    }
+
+    static String geminiChat(String userText, String audioB64, String imageB64, String audioMime) {
         try {
             JSONArray parts = new JSONArray();
             if (imageB64 != null) {
                 parts.put(new JSONObject().put("inline_data", new JSONObject().put("mime_type", "image/jpeg").put("data", imageB64)));
             }
             if (audioB64 != null) {
-                parts.put(new JSONObject().put("inline_data", new JSONObject().put("mime_type", "audio/wav").put("data", audioB64)));
+                parts.put(new JSONObject().put("inline_data", new JSONObject().put("mime_type", audioMime).put("data", audioB64)));
                 parts.put(new JSONObject().put("text", "User voice-e bollo - shune uttor dao, Banglish-e, chhoto kore."));
-            } else {
+            } else if (userText != null) {
                 parts.put(new JSONObject().put("text", userText));
             }
             JSONObject body = new JSONObject()
@@ -1348,6 +1370,141 @@ public class JarvisPC {
             log("🤖 Jarvis (PC): " + clean);
             speak(clean.replaceAll("[*_#`]", "").replaceAll("\\n+", " "));
         }
+    }
+
+    // ------------------------------------------------------------ v1.3: local API + Python web dashboard
+    static final java.util.List<String> webLog = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    static volatile String lastPhoneScreenB64 = "";
+    static com.sun.net.httpserver.HttpServer localApi;
+
+    static void startLocalApi() {
+        try {
+            localApi = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 18778), 0);
+            localApi.createContext("/api", ex -> {
+                try {
+                    if ("OPTIONS".equalsIgnoreCase(ex.getRequestMethod())) { sendApi(ex, new JSONObject()); return; }
+                    String path = ex.getRequestURI().getPath();
+                    switch (path) {
+                        case "/api/status" -> sendApi(ex, new JSONObject()
+                                .put("paired", paired).put("install_id", installId)
+                                .put("ai_on", !geminiApiKey.isEmpty()).put("voice_female", voiceFemale)
+                                .put("features", FEATURES.length).put("version", "1.3"));
+                        case "/api/log" -> {
+                            int since = 0;
+                            try {
+                                String q = ex.getRequestURI().getQuery();
+                                if (q != null && q.contains("since=")) since = Integer.parseInt(q.replaceAll(".*since=(\\d+).*", "$1"));
+                            } catch (Exception ignored) {}
+                            JSONArray arr = new JSONArray();
+                            synchronized (webLog) {
+                                for (int i = Math.max(0, since); i < webLog.size(); i++) arr.put(webLog.get(i));
+                            }
+                            sendApi(ex, new JSONObject().put("lines", arr).put("next", webLog.size()));
+                        }
+                        case "/api/chat" -> {
+                            JSONObject b = new JSONObject(readApiBody(ex));
+                            String text = b.optString("text", "");
+                            if (!text.isBlank()) sendCommandText(text);
+                            sendApi(ex, new JSONObject().put("ok", true));
+                        }
+                        case "/api/voice" -> {
+                            byte[] audio = ex.getRequestBody().readAllBytes();
+                            String mime = ex.getRequestHeaders().getFirst("Content-Type");
+                            if (mime == null || mime.isBlank()) mime = "audio/webm";
+                            String reply = null;
+                            if (!geminiApiKey.isEmpty() && audio.length > 0) {
+                                reply = geminiChat(null, Base64.getEncoder().encodeToString(audio), null, mime.split(";")[0].trim());
+                                if (reply != null && !reply.isBlank()) handleAiReply(reply);
+                            } else if (audio.length > 0) {
+                                sendToPhone("voice", "", Base64.getEncoder().encodeToString(audio));
+                            }
+                            sendApi(ex, new JSONObject().put("ok", reply != null).put("reply", reply == null ? "" : reply));
+                        }
+                        case "/api/key" -> {
+                            JSONObject b = new JSONObject(readApiBody(ex));
+                            geminiApiKey = b.optString("key", "").trim();
+                            config.put("gemini_api_key", geminiApiKey);
+                            saveConfig();
+                            log(geminiApiKey.isEmpty() ? "🔑 PC AI key muche deoa hoyeche." : "🔑 PC AI ON - dashboard theke key dilam.");
+                            refreshAiStatus();
+                            sendApi(ex, new JSONObject().put("ok", true).put("ai_on", !geminiApiKey.isEmpty()));
+                        }
+                        case "/api/github" -> {
+                            JSONObject b = new JSONObject(readApiBody(ex));
+                            githubToken = b.optString("token", "").trim();
+                            config.put("github_token", githubToken);
+                            saveConfig();
+                            sendApi(ex, new JSONObject().put("ok", true));
+                        }
+                        case "/api/github/test" -> {
+                            String login = null;
+                            try {
+                                HttpRequest req = HttpRequest.newBuilder()
+                                        .uri(URI.create("https://api.github.com/user"))
+                                        .header("Authorization", "Bearer " + githubToken)
+                                        .header("Accept", "application/vnd.github+json")
+                                        .timeout(Duration.ofSeconds(15)).GET().build();
+                                HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                                if (res.statusCode() == 200) login = new JSONObject(res.body()).optString("login", "");
+                            } catch (Exception ignored) {}
+                            sendApi(ex, new JSONObject().put("ok", login != null && !login.isEmpty()).put("login", login == null ? "" : login));
+                        }
+                        case "/api/features" -> {
+                            JSONArray arr = new JSONArray();
+                            for (String[] f : FEATURES) arr.put(new JSONObject().put("tool", f[0]).put("label", f[1]).put("example", f[2]));
+                            sendApi(ex, new JSONObject().put("features", arr));
+                        }
+                        case "/api/screen" -> sendApi(ex, new JSONObject().put("image", lastPhoneScreenB64));
+                        case "/api/screen/refresh" -> {
+                            requestPhoneScreen();
+                            sendApi(ex, new JSONObject().put("ok", true));
+                        }
+                        case "/api/voice-call-url" -> sendApi(ex, new JSONObject().put("url", BASE + "/pc-voice?pc_id=" + enc(pcId) + "&token=" + enc(pcToken)));
+                        default -> sendApi(ex, new JSONObject().put("error", "unknown api"));
+                    }
+                } catch (Exception e) {
+                    sendApi(ex, new JSONObject().put("error", e.getMessage()));
+                }
+            });
+            localApi.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
+            localApi.start();
+            log("🌐 Local API chalu: http://127.0.0.1:18778/");
+        } catch (Exception e) { log("⚠️ Local API chalu hoy ni: " + e.getMessage()); }
+    }
+
+    static String readApiBody(com.sun.net.httpserver.HttpExchange ex) {
+        try { return new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8); } catch (Exception e) { return "{}"; }
+    }
+
+    static void sendApi(com.sun.net.httpserver.HttpExchange ex, JSONObject j) {
+        try {
+            byte[] b = j.toString().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+            ex.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            ex.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+            ex.sendResponseHeaders(200, b.length);
+            ex.getResponseBody().write(b);
+            ex.getResponseBody().close();
+        } catch (Exception ignored) {}
+    }
+
+    // v1.3: Python (embed) diye web dashboard serve kora hoy - HTML/CSS/JS interface
+    static void startWebDashboard() {
+        try {
+            java.nio.file.Path py = java.nio.file.Paths.get("python", "python.exe");
+            if (!java.nio.file.Files.exists(py)) { log("🌐 Python bundle pay ni - web dashboard cholbe na (shudhu Swing UI cholbe)."); return; }
+            new ProcessBuilder(py.toAbsolutePath().toString(), "web\\jarvis_web.py")
+                    .redirectErrorStream(true).start();
+            log("🌐 Web dashboard chalu hochhe: http://127.0.0.1:18777/");
+            new Thread(() -> {
+                sleep(1500);
+                try {
+                    if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE))
+                        Desktop.getDesktop().browse(new URI("http://127.0.0.1:18777/"));
+                } catch (Exception ignored) {}
+            }).start();
+        } catch (Exception e) { log("⚠️ Web dashboard chalu hoy ni: " + e.getMessage()); }
     }
 
     // v1.7.0: clipboard sync + file transfer (PC -> phone)
@@ -1416,6 +1573,7 @@ public class JarvisPC {
             sleep(4000);
             JSONObject j = getJson("/api/phone/screen?pc_id=" + enc(pcId) + "&token=" + enc(pcToken));
             String img = (j == null) ? "" : j.optString("image", "");
+            lastPhoneScreenB64 = img;
             if (img.isEmpty()) {
                 log("⚠️ Phone-er screen ekhono aseni — abar try koro.");
                 return;
@@ -1543,6 +1701,7 @@ public class JarvisPC {
     // ------------------------------------------------------------ helpers
 
     static void log(String s) {
+        synchronized (webLog) { webLog.add(s); while (webLog.size() > 300) webLog.remove(0); }
         SwingUtilities.invokeLater(() -> {
             if (logArea != null) {
                 logArea.append(s + "\n");
