@@ -59,6 +59,8 @@ public class JarvisPC {
     static String pcName = "";
     static String pairCode = "";
     static String geminiApiKey = "";
+    static String e2eSecret = "";
+    static volatile boolean phoneHasE2e = false;
     static String githubToken = "";
     static boolean voiceFemale = true;
     static volatile boolean paired = false;
@@ -107,6 +109,16 @@ public class JarvisPC {
         if (pcId.isEmpty()) {
             pcId = "pc-" + UUID.randomUUID().toString().substring(0, 8);
             config.put("pc_id", pcId);
+            saveConfig();
+        }
+        e2eSecret = config.optString("e2e_secret", "");
+        if (e2eSecret.isEmpty()) {
+            byte[] rb = new byte[16];
+            new java.security.SecureRandom().nextBytes(rb);
+            StringBuilder hb = new StringBuilder();
+            for (byte b : rb) hb.append(String.format("%02x", b));
+            e2eSecret = hb.toString();
+            config.put("e2e_secret", e2eSecret);
             saveConfig();
         }
         pcToken = config.optString("pc_token", "");
@@ -292,8 +304,9 @@ public class JarvisPC {
                 }
             }
             case "text" -> {
-                log("📱 Phone: " + text);
-                String result = executePcCommand(text);
+                String plain = e2eDecrypt(text);
+                log("📱 Phone: " + plain);
+                String result = executePcCommand(plain);
                 sendToPhone("result", result, null);
             }
             case "voice", "tts" -> {
@@ -331,6 +344,8 @@ public class JarvisPC {
                     JSONArray tools = s.optJSONArray("tools");
                     JSONArray agents = s.optJSONArray("agents");
                     if (agents != null) phoneAgentsJson = agents.toString();
+                    phoneHasE2e = s.optBoolean("e2e", false);
+                    if (phoneHasE2e) log("🔒 E2E encryption ON — phone-er sathe text command encrypted jachhe.");
                     SwingUtilities.invokeLater(() -> {
                         statusLabel.setText("✅ Paired — phone v" + ver + " • Monitoring " + (mon ? "ON" : "OFF") + " • " + (tools == null ? 0 : tools.length()) + " features");
                         populateFeatures(tools);
@@ -344,9 +359,10 @@ public class JarvisPC {
     }
 
     static void sendToPhone(String kind, String text, String audioB64) {
+        String wireText = "text".equals(kind) ? e2eEncrypt(text) : text;
         JSONObject body = new JSONObject()
                 .put("from", "pc").put("from_id", pcId)
-                .put("to", installId).put("kind", kind).put("text", text)
+                .put("to", installId).put("kind", kind).put("text", wireText)
                 .put("token", pcToken);
         if (audioB64 != null) body.put("audio", audioB64);
         postJson("/api/relay/send", body);
@@ -1201,7 +1217,7 @@ public class JarvisPC {
 
     static void showQr(String code) {
         try {
-            String payload = "jarvis-pair://" + pcId + "/" + code;
+            String payload = "jarvis-pair://" + pcId + "/" + code + "/" + e2eSecret;
             BitMatrix m = new QRCodeWriter().encode(payload, BarcodeFormat.QR_CODE, 280, 280);
             BufferedImage img = new BufferedImage(280, 280, BufferedImage.TYPE_INT_RGB);
             for (int y = 0; y < 280; y++)
@@ -1209,7 +1225,7 @@ public class JarvisPC {
                     img.setRGB(x, y, m.get(x, y) ? 0x000000 : 0xFFFFFF);
             qrLabel.setIcon(new ImageIcon(img));
             qrLabel.setText("");
-            pairCodeLabel.setText("Code: " + code + "   •   PC ID: " + pcId);
+            pairCodeLabel.setText("Code: " + code + "   •   PC ID: " + pcId + "   •   🔒 E2E");
         } catch (Exception e) {
             qrLabel.setText("QR banate parlam na: " + e.getMessage());
         }
@@ -1457,6 +1473,47 @@ public class JarvisPC {
             log("🤖 Jarvis (PC): " + clean);
             speak(clean.replaceAll("[*_#`]", "").replaceAll("\\n+", " "));
         }
+    }
+
+    // ------------------------------------------------------------ v1.5: E2E relay encryption (phone-er moto)
+    // Secret sudhu QR-e thake (PC screen -> phone camera) — backend kokhono secret dekhe na.
+    // Key: PBKDF2-HmacSHA256 (100k) -> AES-256, AES/GCM (12-byte IV). Phone-er RelayCrypto-r sathe mile jay.
+    // Text command-i encrypted; result/sync/notif plaintext thake (remote page + Telegram-e result dekhte hoy).
+    static javax.crypto.SecretKey e2eKey() {
+        try {
+            javax.crypto.SecretKeyFactory f = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
+            javax.crypto.spec.PBEKeySpec spec = new javax.crypto.spec.PBEKeySpec(
+                    e2eSecret.toCharArray(), "jarvis-e2e-v1".getBytes(StandardCharsets.UTF_8), 100000, 256);
+            return new javax.crypto.spec.SecretKeySpec(f.generateSecret(spec).getEncoded(), "AES");
+        } catch (Exception e) { return null; }
+    }
+
+    static String e2eEncrypt(String plain) {
+        if (e2eSecret.isEmpty() || !phoneHasE2e) return plain;
+        try {
+            byte[] iv = new byte[12];
+            new java.security.SecureRandom().nextBytes(iv);
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.ENCRYPT_MODE, e2eKey(), new javax.crypto.spec.GCMParameterSpec(128, iv));
+            byte[] out = c.doFinal(plain.getBytes(StandardCharsets.UTF_8));
+            byte[] both = new byte[iv.length + out.length];
+            System.arraycopy(iv, 0, both, 0, iv.length);
+            System.arraycopy(out, 0, both, iv.length, out.length);
+            return "ENC1:" + Base64.getEncoder().encodeToString(both);
+        } catch (Exception e) { return plain; }
+    }
+
+    static String e2eDecrypt(String s) {
+        if (s == null || !s.startsWith("ENC1:")) return s;
+        try {
+            byte[] bytes = Base64.getDecoder().decode(s.substring(5));
+            if (bytes.length <= 12) return s;
+            byte[] iv = java.util.Arrays.copyOfRange(bytes, 0, 12);
+            byte[] ct = java.util.Arrays.copyOfRange(bytes, 12, bytes.length);
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.DECRYPT_MODE, e2eKey(), new javax.crypto.spec.GCMParameterSpec(128, iv));
+            return new String(c.doFinal(ct), StandardCharsets.UTF_8);
+        } catch (Exception e) { return s; }
     }
 
     // ------------------------------------------------------------ v1.3: local API + Python web dashboard
@@ -1779,6 +1836,13 @@ public class JarvisPC {
         installId = "";
         pcToken = "";
         pairCode = "";
+        phoneHasE2e = false;
+        byte[] rb = new byte[16];
+        new java.security.SecureRandom().nextBytes(rb);
+        StringBuilder hb = new StringBuilder();
+        for (byte b : rb) hb.append(String.format("%02x", b));
+        e2eSecret = hb.toString();
+        config.put("e2e_secret", e2eSecret);
         config.put("paired", false);
         config.put("install_id", "");
         config.put("pc_token", "");
@@ -1855,7 +1919,14 @@ public class JarvisPC {
             startAgentTask("pc", "open notepad");
             finishAgentTask("pc", true, "notepad khule dilam");
             System.out.println("agent snapshot: " + agentsSnapshotJson().length() + (agentsSnapshotJson().length() == 20 ? " OK" : " FAIL"));
-            System.out.println("network: SKIP (this VM blocks Java TCP — pair/relay flow verified with curl)");
+            // v1.5: E2E round-trip (phone-er RelayCrypto-r sathe same PBKDF2/GCM)
+        phoneHasE2e = true;
+        String enc = e2eEncrypt("hello e2e test");
+        System.out.println("e2e round-trip: " + ("hello e2e test".equals(e2eDecrypt(enc)) && enc.startsWith("ENC1:") ? "OK" : "FAIL"));
+        System.out.println("e2e plaintext passthrough: " + ("plain text".equals(e2eDecrypt("plain text")) ? "OK" : "FAIL"));
+        phoneHasE2e = false;
+        System.out.println("e2e off = plaintext: " + ("hello".equals(e2eEncrypt("hello")) ? "OK" : "FAIL"));
+        System.out.println("network: SKIP (this VM blocks Java TCP — pair/relay flow verified with curl)");
             System.out.println("SELF-TEST DONE (offline parts OK)");
             System.exit(0);
         }
