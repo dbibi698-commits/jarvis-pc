@@ -112,6 +112,7 @@ public class JarvisPC {
         pcToken = config.optString("pc_token", "");
         installId = config.optString("install_id", "");
         geminiApiKey = config.optString("gemini_api_key", "");
+        geminiModel = config.optString("gemini_model", "");
         githubToken = config.optString("github_token", "");
         voiceFemale = config.optBoolean("voice_female", true);
         paired = config.optBoolean("paired", false) && !pcToken.isEmpty() && !installId.isEmpty();
@@ -318,6 +319,7 @@ public class JarvisPC {
             }
             case "result" -> {
                 log("📱 Phone: " + text);
+                finishAgentTask("pc", true, text);
                 String clean = text.replaceAll("[*_#`]", "").replaceAll("\\n+", " ");
                 if (clean.length() > 4 && clean.length() < 600) speak(clean);
             }
@@ -327,6 +329,8 @@ public class JarvisPC {
                     String ver = s.optString("app_version", "?");
                     boolean mon = s.optBoolean("monitoring", false);
                     JSONArray tools = s.optJSONArray("tools");
+                    JSONArray agents = s.optJSONArray("agents");
+                    if (agents != null) phoneAgentsJson = agents.toString();
                     SwingUtilities.invokeLater(() -> {
                         statusLabel.setText("✅ Paired — phone v" + ver + " • Monitoring " + (mon ? "ON" : "OFF") + " • " + (tools == null ? 0 : tools.length()) + " features");
                         populateFeatures(tools);
@@ -1109,6 +1113,11 @@ public class JarvisPC {
         tabs.addTab("💬 Chat", center);
         tabs.addTab("📱 Features (" + featureModel.size() + ")", featPanel);
         tabs.addTab("🔗 Connections", buildConnectionsPanel());
+        final JTextArea agentsArea = new JTextArea();
+        agentsArea.setEditable(false);
+        agentsArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+        tabs.addTab("🤖 Agents (20)", new JScrollPane(agentsArea));
+        new javax.swing.Timer(2000, e -> agentsArea.setText(agentsBoardText())).start();
         mainPanel.add(tabs, BorderLayout.CENTER);
 
         JPanel bottom = new JPanel(new BorderLayout(6, 6));
@@ -1159,6 +1168,9 @@ public class JarvisPC {
             log(voiceFemale ? "👩 Voice: Female (meye) - ekhon theke meye voice-e bolbe." : "👨 Voice: Male - ekhon theke chele voice-e bolbe.");
         });
         btnRow.add(apiKeyBtn);
+        JButton testKeyBtn = new JButton("🧪 Test Key");
+        testKeyBtn.addActionListener(e -> new Thread(JarvisPC::testApiKey).start());
+        btnRow.add(testKeyBtn);
         btnRow.add(voiceGenderBtn);
         JButton webBtn = new JButton("🌐 Web Dashboard");
         webBtn.addActionListener(e -> {
@@ -1212,13 +1224,15 @@ public class JarvisPC {
 
     static void sendCommandText(String cmd) {
         log("💻 Tumi: " + cmd);
+        String agentId = agentForCommand(cmd);
+        startAgentTask(agentId, cmd);
         String low = cmd.toLowerCase();
         if (low.contains("phone screen") || low.contains("mobile screen") || low.contains("phone-er screen") || low.contains("phone er screen") || low.contains("screen-e ki") || low.contains("screen e ki")) {
             askPcAiPhoneScreen();
             return;
         }
         if (isPcLocalCommand(cmd)) {
-            new Thread(() -> log(executePcCommand(cmd))).start();
+            new Thread(() -> { String r = executePcCommand(cmd); log(r); finishAgentTask(agentId, true, r); }).start();
             return;
         }
         if (!geminiApiKey.isEmpty()) {
@@ -1229,7 +1243,9 @@ public class JarvisPC {
     }
 
     // ------------------------------------------------------------ v1.1: PC AI (Gemini, on-PC)
-    static final String GEMINI_MODEL = "gemini-2.5-flash";
+    // v1.4: phone gemini-3.8-flash use kore (Prefs.DEFAULT_FAST_MODEL) - PC-teo 3.8 age, tarpor fallback
+    static final String[] GEMINI_MODELS = {"gemini-3.8-flash", "gemini-4-argon", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"};
+    static volatile String geminiModel = "";
     static final String AI_SYSTEM = "Tumi JARVIS, Windows PC-te chola AI assistant. User-er sathe Banglish-e (Bangla+English mix) kotha bolo, chhoto ar clear uttor dao. "
             + "Tumi PC-te cholcho, ar phone-er Jarvis-er satheo jukto acho. Jodi user phone-er kichu chay (call, SMS, WhatsApp, photo, camera, location, phone-er app/file), "
             + "uttor-er modhye [[PHONE]] tarpor command-ta likho, jemon: [[PHONE]] battery status. Jodi user PC-er kichu chay (app kholo, type koro, click koro, run koro, shutdown, volume), "
@@ -1267,17 +1283,20 @@ public class JarvisPC {
         new Thread(() -> {
             String reply = geminiChat(text, audioB64);
             if (reply == null || reply.isBlank()) {
+                finishAgentTask("main", false, "PC AI uttor dilo na");
                 log("⚠️ PC AI uttor dilo na - key-ta thik ache kina dekho (🔑 API Key).");
                 if (text != null) sendToPhone("text", text, null);
                 return;
             }
             handleAiReply(reply);
+            finishAgentTask("main", true, reply);
         }).start();
     }
 
     // v1.2: PC AI phone-er screen dekhe (Vision) - chhobi PC-te show kore na, sudhu bujhe uttor dey
     static void askPcAiPhoneScreen() {
         if (geminiApiKey.isEmpty()) { requestPhoneScreen(); return; }
+        startAgentTask("media", "phone screen dekhchhi");
         log("🤖 Phone-er screen dekhchhi (na dekhiye)…");
         new Thread(() -> {
             sendToPhone("screen_req", "screenshot please", null);
@@ -1290,8 +1309,9 @@ public class JarvisPC {
                 String img = new JSONObject(res.body()).optString("image", "");
                 if (img.isEmpty()) { log("⚠️ Phone-er screen ekhono aseni - phone online ache kina dekho, abar bolo."); return; }
                 String reply = geminiChat("Phone-er screen-er ei screenshot-e ki ki dekhte pachho? Banglish-e chhoto kore bolo - app, text, notification ja ache.", null, img);
-                if (reply == null || reply.isBlank()) { log("⚠️ Phone-er screen dekhte parlam na - abar try koro."); return; }
+                if (reply == null || reply.isBlank()) { finishAgentTask("media", false, "screen dekhte parlam na"); log("⚠️ Phone-er screen dekhte parlam na - abar try koro."); return; }
                 handleAiReply(reply);
+                finishAgentTask("media", true, reply);
             } catch (Exception e) { log("⚠️ Phone-er screen ante parlam na: " + e.getMessage()); }
         }).start();
     }
@@ -1309,6 +1329,60 @@ public class JarvisPC {
         return geminiChat(userText, audioB64, imageB64, "audio/wav");
     }
 
+    static java.util.List<String> candidateModels() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (geminiModel != null && !geminiModel.isBlank()) out.add(geminiModel);
+        for (String m : GEMINI_MODELS) if (!out.contains(m)) out.add(m);
+        return out;
+    }
+
+    // v1.4: key-er jonno kon model kaj kore - ListModels theke ber koro (3.8-flash age)
+    static String pickModelFromList(String json) {
+        try {
+            JSONArray models = new JSONObject(json).optJSONArray("models");
+            if (models == null) return "";
+            java.util.List<String> names = new java.util.ArrayList<>();
+            for (int i = 0; i < models.length(); i++) {
+                JSONObject m = models.optJSONObject(i);
+                if (m == null) continue;
+                JSONArray methods = m.optJSONArray("supportedGenerationMethods");
+                boolean ok = false;
+                if (methods != null) for (int k = 0; k < methods.length(); k++) if ("generateContent".equals(methods.optString(k))) ok = true;
+                if (!ok) continue;
+                String name = m.optString("name", "").replace("models/", "");
+                if (!name.isEmpty()) names.add(name);
+            }
+            String[] pref = {"gemini-3.8-flash", "gemini-4-argon", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"};
+            for (String pp : pref) if (names.contains(pp)) return pp;
+            for (String n : names) if (n.contains("flash")) return n;
+            return names.isEmpty() ? "" : names.get(0);
+        } catch (Exception e) { return ""; }
+    }
+
+    static String testApiKey() {
+        if (geminiApiKey.isEmpty()) { log("⚠️ Age 🔑 API Key dao, tarpor Test koro."); return ""; }
+        try {
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"))
+                    .header("x-goog-api-key", geminiApiKey)
+                    .timeout(Duration.ofSeconds(30)).GET().build();
+            HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                String errMsg = "";
+                try { errMsg = new JSONObject(res.body()).optJSONObject("error").optString("message", ""); } catch (Exception ignored) {}
+                log("⚠️ API Key test failed: HTTP " + res.statusCode() + (errMsg.isEmpty() ? "" : " - " + errMsg));
+                return "";
+            }
+            String model = pickModelFromList(res.body());
+            if (model.isEmpty()) { log("⚠️ Key thik, kintu kono generateContent model pelam na."); return ""; }
+            geminiModel = model;
+            config.put("gemini_model", model);
+            saveConfig();
+            log("✅ API Key OK - PC AI model: " + model);
+            return model;
+        } catch (Exception e) { log("⚠️ API Key test error: " + e.getMessage()); return ""; }
+    }
+
     static String geminiChat(String userText, String audioB64, String imageB64, String audioMime) {
         try {
             JSONArray parts = new JSONArray();
@@ -1324,19 +1398,32 @@ public class JarvisPC {
             JSONObject body = new JSONObject()
                     .put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", AI_SYSTEM))))
                     .put("contents", new JSONArray().put(new JSONObject().put("parts", parts)));
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent"))
-                    .header("x-goog-api-key", geminiApiKey)
-                    .header("Content-Type", "application/json")
-                    .timeout(Duration.ofSeconds(60))
-                    .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
-                    .build();
-            HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
-            if (res.statusCode() < 200 || res.statusCode() >= 300) {
-                log("⚠️ PC AI error: HTTP " + res.statusCode());
-                return null;
+            JSONObject j = null;
+            for (String model : candidateModels()) {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent"))
+                        .header("x-goog-api-key", geminiApiKey)
+                        .header("Content-Type", "application/json")
+                        .timeout(Duration.ofSeconds(60))
+                        .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
+                        .build();
+                HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                if (res.statusCode() >= 200 && res.statusCode() < 300) {
+                    j = new JSONObject(res.body());
+                    if (!model.equals(geminiModel)) {
+                        geminiModel = model;
+                        config.put("gemini_model", model);
+                        saveConfig();
+                        log("🤖 PC AI model: " + model);
+                    }
+                    break;
+                }
+                String errMsg = "";
+                try { errMsg = new JSONObject(res.body()).optJSONObject("error").optString("message", ""); } catch (Exception ignored) {}
+                if (errMsg.length() > 150) errMsg = errMsg.substring(0, 150);
+                log("⚠️ PC AI error: HTTP " + res.statusCode() + " (" + model + ")" + (errMsg.isEmpty() ? "" : " - " + errMsg));
             }
-            JSONObject j = new JSONObject(res.body());
+            if (j == null) return null;
             JSONArray cands = j.optJSONArray("candidates");
             if (cands == null || cands.length() == 0) return null;
             JSONObject content = cands.optJSONObject(0).optJSONObject("content");
@@ -1460,6 +1547,15 @@ public class JarvisPC {
                             sendApi(ex, new JSONObject().put("ok", true));
                         }
                         case "/api/voice-call-url" -> sendApi(ex, new JSONObject().put("url", BASE + "/pc-voice?pc_id=" + enc(pcId) + "&token=" + enc(pcToken)));
+                        case "/api/agents" -> {
+                            JSONArray phone = new JSONArray();
+                            try { phone = new JSONArray(phoneAgentsJson); } catch (Exception ignored) {}
+                            sendApi(ex, new JSONObject().put("pc", agentsSnapshotJson()).put("phone", phone).put("total", pcAgents.size() + phone.length()));
+                        }
+                        case "/api/key/test" -> {
+                            String m = testApiKey();
+                            sendApi(ex, new JSONObject().put("ok", !m.isEmpty()).put("model", m));
+                        }
                         default -> sendApi(ex, new JSONObject().put("error", "unknown api"));
                     }
                 } catch (Exception e) {
@@ -1505,6 +1601,84 @@ public class JarvisPC {
                 } catch (Exception ignored) {}
             }).start();
         } catch (Exception e) { log("⚠️ Web dashboard chalu hoy ni: " + e.getMessage()); }
+    }
+
+    // ------------------------------------------------------------ v1.4: 20 PC agents (phone-e 20 + PC-te 20 = mot 40)
+    static class PcAgent {
+        String id, name, emoji, job, status = "IDLE", task = "", lastResult = "";
+        long startedAt = 0; int progress = 0, done = 0, failed = 0;
+    }
+    static final java.util.List<PcAgent> pcAgents = new java.util.ArrayList<>();
+    static volatile String phoneAgentsJson = "[]";
+    static {
+        String[][] defs = {
+            {"main", "🤖", "Main Agent", "Tomar sathe kotha bole, kaj vag kore dey"},
+            {"builder", "🏗️", "Builder", "APK / EXE / iOS app banay"},
+            {"github", "🐙", "GitHub Agent", "Repo, push, code manage kore"},
+            {"media", "🎬", "Media Agent", "Video, photo, screen dekhe"},
+            {"files", "📁", "Files Agent", "File transfer, Supabase, Drive, backup kore"},
+            {"pc", "💻", "PC Agent", "PC control kore - app, type, click, power"},
+            {"writer", "✍️", "Writer", "Likha, golpo, script likhe"},
+            {"researcher", "🔍", "Researcher", "Search kore, tothyo khuje dey"},
+            {"translator", "🌐", "Translator", "Bangla-English-Hindi translate kore"},
+            {"scheduler", "⏰", "Scheduler", "Alarm, reminder, routine mone rakhay"},
+            {"health", "🏃", "Health", "Health, steps, ghum track kore"},
+            {"finance", "💰", "Finance", "Taka, khoroch, budget dekhe"},
+            {"shopper", "🛒", "Shopper", "Online kena-kata kore"},
+            {"travel", "✈️", "Travel", "Location, rasta, travel plan kore"},
+            {"music", "🎵", "Music", "Gaan chalaye, YouTube chalaye"},
+            {"social", "💬", "Social", "WhatsApp, SMS, social media chalaye"},
+            {"email", "📧", "Email", "Email pore, pathay"},
+            {"calendar", "📅", "Calendar", "Event, meeting mone rakhay"},
+            {"security", "🛡️", "Security", "Security scan, phone nirapod rakhay"},
+            {"learner", "🧠", "Learner", "Tomar ovvas sekhe, predict kore"}
+        };
+        for (String[] d : defs) { PcAgent a = new PcAgent(); a.id = d[0]; a.emoji = d[1]; a.name = d[2]; a.job = d[3]; pcAgents.add(a); }
+    }
+    static PcAgent findAgent(String id) { for (PcAgent a : pcAgents) if (a.id.equals(id)) return a; return pcAgents.get(0); }
+    static String agentForCommand(String cmd) {
+        String low = cmd.toLowerCase();
+        if (low.contains("phone screen") || low.contains("mobile screen") || low.contains("screen")) return "media";
+        if (low.contains("github") || low.contains("repo") || low.contains("push")) return "github";
+        if (low.contains("file") || low.contains("clipboard") || low.contains("supabase") || low.contains("drive")) return "files";
+        if (low.contains("build") || low.contains("apk") || low.contains("exe") || low.contains("ios")) return "builder";
+        if (low.contains("translate")) return "translator";
+        if (low.contains("alarm") || low.contains("reminder") || low.contains("routine")) return "scheduler";
+        if (isPcLocalCommand(cmd)) return "pc";
+        return "main";
+    }
+    static void startAgentTask(String id, String task) {
+        PcAgent a = findAgent(id);
+        a.status = "WORKING"; a.task = task; a.startedAt = System.currentTimeMillis(); a.progress = 10;
+    }
+    static void finishAgentTask(String id, boolean ok, String result) {
+        PcAgent a = findAgent(id);
+        a.status = ok ? "DONE" : "FAILED"; a.progress = ok ? 100 : 0;
+        a.lastResult = result == null ? "" : result;
+        if (a.lastResult.length() > 120) a.lastResult = a.lastResult.substring(0, 120);
+        if (ok) a.done++; else a.failed++;
+    }
+    static JSONArray agentsSnapshotJson() {
+        JSONArray arr = new JSONArray();
+        for (PcAgent a : pcAgents) {
+            arr.put(new JSONObject().put("id", a.id).put("name", a.name).put("emoji", a.emoji).put("job", a.job)
+                    .put("status", a.status).put("task", a.task)
+                    .put("elapsed_s", a.status.equals("WORKING") ? (System.currentTimeMillis() - a.startedAt) / 1000 : 0)
+                    .put("progress", a.progress).put("done", a.done).put("failed", a.failed).put("last", a.lastResult));
+        }
+        return arr;
+    }
+    static String agentsBoardText() {
+        StringBuilder sb = new StringBuilder("🤖 PC AGENTS - 20 (phone-e aro 20, mot 40)\n\n");
+        for (PcAgent a : pcAgents) {
+            String dot = a.status.equals("WORKING") ? "🟢" : a.status.equals("DONE") ? "✅" : a.status.equals("FAILED") ? "❌" : "⚪";
+            sb.append(dot).append(" ").append(a.emoji).append(" ").append(a.name);
+            if (!a.task.isEmpty()) sb.append(" - ").append(a.task);
+            if (a.status.equals("WORKING")) sb.append(" (").append((System.currentTimeMillis() - a.startedAt) / 1000).append("s)");
+            if (!a.lastResult.isEmpty()) sb.append("\n    └ ").append(a.lastResult);
+            sb.append("\n");
+        }
+        return sb.toString();
     }
 
     // v1.7.0: clipboard sync + file transfer (PC -> phone)
@@ -1668,6 +1842,19 @@ public class JarvisPC {
                 .put("device_model", "test").put("app_version", "1.6.0")
                 .put("monitoring", true).put("permissions", new JSONObject()));
         if (hb == null) {
+            // v1.4: model picker - key-er list-e 3.8-flash thakle setai nebe (2.5-flash 404 dileo)
+            String sampleList = "{\"models\":[{\"name\":\"models/gemini-2.5-flash\",\"supportedGenerationMethods\":[\"generateContent\"]},{\"name\":\"models/gemini-3.8-flash\",\"supportedGenerationMethods\":[\"generateContent\"]},{\"name\":\"models/gemini-embedding-001\",\"supportedGenerationMethods\":[\"embedContent\"]}]}";
+            System.out.println("model pick (3.8 in list): " + ("gemini-3.8-flash".equals(pickModelFromList(sampleList)) ? "OK" : "FAIL got=" + pickModelFromList(sampleList)));
+            String sampleList2 = "{\"models\":[{\"name\":\"models/gemini-2.5-flash\",\"supportedGenerationMethods\":[\"generateContent\"]}]}";
+            System.out.println("model pick (only 2.5): " + ("gemini-2.5-flash".equals(pickModelFromList(sampleList2)) ? "OK" : "FAIL got=" + pickModelFromList(sampleList2)));
+            // v1.4: agents - 20 PC agents, routing
+            System.out.println("pc agents: " + pcAgents.size() + (pcAgents.size() == 20 ? " OK" : " FAIL"));
+            System.out.println("route open: " + ("pc".equals(agentForCommand("open notepad")) ? "OK" : "FAIL"));
+            System.out.println("route phone screen: " + ("media".equals(agentForCommand("phone screen")) ? "OK" : "FAIL"));
+            System.out.println("route hello: " + ("main".equals(agentForCommand("hello")) ? "OK" : "FAIL"));
+            startAgentTask("pc", "open notepad");
+            finishAgentTask("pc", true, "notepad khule dilam");
+            System.out.println("agent snapshot: " + agentsSnapshotJson().length() + (agentsSnapshotJson().length() == 20 ? " OK" : " FAIL"));
             System.out.println("network: SKIP (this VM blocks Java TCP — pair/relay flow verified with curl)");
             System.out.println("SELF-TEST DONE (offline parts OK)");
             System.exit(0);
