@@ -6,6 +6,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -13,8 +16,8 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
       - run: choco install wixtoolset -y
-      - run: javac -encoding UTF-8 -cp libs/zxing-core-3.5.3.jar;libs/json-20240303.jar -d classes src/JarvisPC.java
-      - run: cd classes; jar xf ../libs/zxing-core-3.5.3.jar; jar xf ../libs/json-20240303.jar; cd ..
+      - run: javac -encoding UTF-8 -cp "libs/zxing-core-3.5.3.jar;libs/json-20240303.jar" -d classes src/JarvisPC.java
+      - run: cd classes && jar xf ../libs/zxing-core-3.5.3.jar && jar xf ../libs/json-20240303.jar && cd ..
       - run: jar --create --file jarvis-pc.jar --main-class JarvisPC -C classes .
       - run: jpackage --type exe --input . --main-jar jarvis-pc.jar --main-class JarvisPC --name JarvisPC --app-version 1.0 --win-shortcut --win-menu --dest out
       - uses: actions/upload-artifact@v4
