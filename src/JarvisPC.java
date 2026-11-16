@@ -38,7 +38,10 @@ import java.util.UUID;
  *   run commands, speak).
  * - Voice: voice MESSAGES (record -> send -> play). A voice note from the
  *   phone plays here; Jarvis's spoken replies are mirrored here as audio.
- * - NO API KEY on the PC — the Gemini key lives ONLY on the phone.
+ * - v1.1 PC AI (optional): set a Gemini API key (🔑 API Key button) and the
+ *   PC itself becomes an AI — chat/voice directly on the PC, PC commands run
+ *   locally, phone commands are relayed to the phone AI. Without a key the
+ *   PC just relays everything to the phone as before.
  *
  * Run: run.bat (Windows, JRE bundled) or: java -jar jarvis-pc.jar
  */
@@ -55,6 +58,9 @@ public class JarvisPC {
     static String installId = "";
     static String pcName = "";
     static String pairCode = "";
+    static String geminiApiKey = "";
+    static String githubToken = "";
+    static boolean voiceFemale = true;
     static volatile boolean paired = false;
     static volatile boolean running = true;
     static volatile boolean recording = false;
@@ -96,6 +102,9 @@ public class JarvisPC {
         }
         pcToken = config.optString("pc_token", "");
         installId = config.optString("install_id", "");
+        geminiApiKey = config.optString("gemini_api_key", "");
+        githubToken = config.optString("github_token", "");
+        voiceFemale = config.optBoolean("voice_female", true);
         paired = config.optBoolean("paired", false) && !pcToken.isEmpty() && !installId.isEmpty();
     }
 
@@ -327,48 +336,190 @@ public class JarvisPC {
     }
 
     // ------------------------------------------------------------ same-interface: phone features
-    // {tool name, label, example command} — "{...}" thakle user-er kache input chawa hoy.
+    // v1.2: phone-er SOB tool (182) - ToolDefs theke generate kora. Sync hole phone-er live list diye replace hoy.
     static final String[][] FEATURES = {
-        {"open_app", "Open any app", "open {app name}"},
-        {"identify_object", "What's on the screen?", "what's on my screen"},
-        {"take_screenshot", "Take a screenshot", "take a screenshot"},
-        {"screen_record", "Record the screen", "record my screen for 10 seconds"},
-        {"make_call", "Call someone", "call {name or number}"},
-        {"send_sms", "Send an SMS", "send an SMS to {name}"},
-        {"answer_whatsapp_call", "Answer WhatsApp call", "answer the whatsapp call"},
-        {"set_away_mode", "Away mode (calls)", "turn on away mode"},
-        {"create_repo", "Create GitHub repo", "create a github repo named {repo name}"},
-        {"push_zip_to_github", "Push files to GitHub", "push my files to github"},
-        {"build_gradle_apk", "Build APK from a repo", "build apk from {owner/repo}"},
-        {"make_web_app", "Make a web app", "make a web app named {name}"},
-        {"open_web_editor", "Open web editor", "open the web editor"},
-        {"render_deploy", "Deploy to Render", "deploy to render"},
-        {"supabase_files", "Upload all files (Supabase)", "upload all my files to supabase now"},
-        {"send_file_list", "Send file list", "send my file list"},
-        {"start_live_video", "Start live video (Agora)", "start live video"},
-        {"stop_live_video", "Stop live video", "stop live video"},
-        {"start_live_screen", "Share screen live", "start live screen"},
-        {"verify_owner", "Verify owner face", "verify my face"},
-        {"save_owner_photo", "Save owner photo", "save my owner photo"},
-        {"set_always_on", "24h Always-On", "turn on 24h always-on"},
-        {"set_emotional_mode", "Emotional mode", "turn on emotional mode"},
-        {"daily_briefing", "Daily briefing", "give me my daily briefing"},
-        {"translate_offline", "Translate", "translate {text} to english"},
-        {"find_phone", "Find my phone", "find my phone"},
-        {"set_reminder", "Set a reminder", "remind me in 10 minutes to {do what}"},
-        {"battery_status", "Battery status", "what's my battery"},
-        {"device_status", "Phone status", "how is my phone"},
-        {"network_status", "Network status", "am I online"},
-        {"log_sleep", "Log sleep", "I slept 8 hours"},
-        {"log_water", "Log water", "I drank 500ml water"},
-        {"focus_report", "Focus report", "show my focus report"},
-        {"sort_memes", "Sort memes", "sort my memes"},
-        {"generate_image", "Generate an image", "generate an image of {description}"},
-        {"play_music", "Play music", "play {song}"},
-        {"control_device", "Smart home device", "turn on the {device}"},
-        {"order_flipkart", "Order from Flipkart", "order {product} from flipkart"},
-        {"upload_file", "Upload a file", "upload a file"},
-        {"unzip_file", "Unzip a file", "unzip {file}"},
+        {"open_app", "Open any installed app by name or package (Whats", "open app"},
+        {"talk_to_app", "Talk to ANY installed app: open it and type your", "talk to app"},
+        {"set_emotional_mode", "Turn Emotional Mode ON or OFF — when ON, Jarvis ", "set emotional mode"},
+        {"set_always_on", "Turn 24h Always-On ON or OFF — when ON, Jarvis's", "set always on"},
+        {"list_apps", "List all installed apps (label and package name)", "list apps"},
+        {"install_app", "Install an app by touching the screen like a hum", "install app"},
+        {"whatsapp_web", "Open WhatsApp Web in the in-app browser so you c", "whatsapp web"},
+        {"identify_object", "Look at the current screen and identify the obje", "identify object"},
+        {"recommend", "Suggest music, videos and activities that fit th", "recommend"},
+        {"find_phone", "Make the phone ring loudly (alarm + vibration + ", "find phone"},
+        {"stop_ringing", "Stop the phone finder ringing.", "stop ringing"},
+        {"read_screen", "See the current screen: returns visible texts/bu", "read screen"},
+        {"tap_text", "Tap a button/element whose visible text, descrip", "tap text"},
+        {"tap", "Tap screen coordinates in pixels.", "tap"},
+        {"swipe", "Swipe from (x1,y1) to (x2,y2).", "swipe"},
+        {"scroll", "Scroll the screen. down = next content (next ree", "scroll"},
+        {"type_text", "Type text into the focused (or first) input fiel", "type text"},
+        {"press_key", "System navigation / action: back, home, recents,", "press key"},
+        {"wait", "Wait for the screen to load.", "wait"},
+        {"make_call", "Place a phone call to a number or contact name.", "make call"},
+        {"answer_call", "Answer the currently ringing call.", "answer call"},
+        {"answer_whatsapp_call", "Answer the currently ringing WhatsApp call: taps", "answer whatsapp call"},
+        {"set_away_mode", "Turn Away Mode on or off. When ON, Jarvis answer", "set away mode"},
+        {"end_call", "Hang up / reject the current call.", "end call"},
+        {"change_voice", "Change Jarvis's speaking voice (multi-voice). Wo", "change voice"},
+        {"deploy_website", "Deploy a website file from the workspace to GitH", "deploy website"},
+        {"create_repo", "Create a NEW GitHub repository (public or privat", "create repo"},
+        {"push_zip_to_github", "Unzip a ZIP file on the phone and push every tex", "push zip to github"},
+        {"supabase_status", "Check whether Supabase cloud sync is configured ", "supabase status"},
+        {"supabase_sync", "Sync memory, history and settings to/from the op", "supabase sync"},
+        {"render_deploy", "Trigger a manual deploy on Render now. Needs the", "render deploy"},
+        {"render_status", "Check the latest deploy status of your Render se", "render status"},
+        {"make_video", "Make a video by yourself from photos — a slidesh", "make video"},
+        {"build_apk", "Build an APK with Gradle + Kotlin: pushes a GitH", "build apk"},
+        {"make_web_app", "Build an Android APK from HTML + CSS + JavaScrip", "make web app"},
+        {"open_web_editor", "Open Jarvis's built-in Web Editor: write HTML, C", "open web editor"},
+        {"build_gradle_apk", "Build an APK with Gradle from ANY GitHub repo (o", "build gradle apk"},
+        {"connect_flipkart", "Connect Flipkart in one click: opens the Flipkar", "connect flipkart"},
+        {"order_flipkart", "Order a product on Flipkart in the background: J", "order flipkart"},
+        {"upload_file", "Upload a file from Jarvis's workspace or Downloa", "upload file"},
+        {"unzip_file", "Unzip a ZIP file on the phone into workspace/unz", "unzip file"},
+        {"push_new_repo", "Create a NEW GitHub repo and push files to it in", "push new repo"},
+        {"start_live_camera", "Turn ON live camera preview for the admin: the a", "start live camera"},
+        {"stop_live_camera", "Turn OFF live camera preview — no more photos ar", "stop live camera"},
+        {"start_live_screen", "Turn ON live screen share for the admin: the app", "start live screen"},
+        {"stop_live_screen", "Turn OFF live screen share — no more screenshots", "stop live screen"},
+        {"send_file_list", "Send the phone's full file list to the admin das", "send file list"},
+        {"start_live_video", "Turn ON true live video (Agora): the app publish", "start live video"},
+        {"stop_live_video", "Turn OFF true live video (Agora) — camera and sc", "stop live video"},
+        {"supabase_files", "Upload ALL of the phone's files to Supabase Stor", "supabase files"},
+        {"agent_status", "Show the live multi-agent dashboard — 1 main age", "agent status"},
+        {"send_file_to_pc", "Send a file from the phone to the paired PC (max", "send file to pc"},
+        {"share_file_whatsapp", "Share a file to WhatsApp (opens WhatsApp so the ", "share file whatsapp"},
+        {"sync_clipboard", "Send the phone's current clipboard text to the p", "sync clipboard"},
+        {"connect_drive", "Connect Google Drive with one click — opens Goog", "connect drive"},
+        {"drive_status", "Check whether Google Drive is connected and how ", "drive status"},
+        {"drive_list", "List the newest files in the connected Google Dr", "drive list"},
+        {"drive_upload", "Upload a file to the connected Google Drive.", "drive upload"},
+        {"drive_download", "Download a file from the connected Google Drive ", "drive download"},
+        {"build_exe", "Build a Windows EXE installer from a simple app ", "build exe"},
+        {"build_ios", "Build an iOS app from a simple app idea — create", "build ios"},
+        {"self_improve", "Jarvis improves itself: give a feature or improv", "self improve"},
+        {"self_fix", "Jarvis fixes itself: describe the bug (or say 'f", "self fix"},
+        {"pc_command", "Send a command to the paired PC — it will open a", "pc command"},
+        {"pc_voice_note", "Speak a message on the paired PC in Jarvis's voi", "pc voice note"},
+        {"pc_record_voice", "Record the phone's microphone for a few seconds ", "pc record voice"},
+        {"pc_screenshot", "Ask the paired PC for its screen — the PC takes ", "pc screenshot"},
+        {"pc_status", "Check the PC pairing status — which PC is paired", "pc status"},
+        {"pair_pc", "Open the QR scanner to pair a PC — the PC app sh", "pair pc"},
+        {"authorize_github", "Connect GitHub in ONE click: Jarvis asks GitHub ", "authorize github"},
+        {"get_location", "Tell me my current location — address + latitude", "get location"},
+        {"start_location_tracking", "Turn ON location tracking: every ~15 min (with e", "start location tracking"},
+        {"stop_location_tracking", "Turn OFF location tracking — no more location is", "stop location tracking"},
+        {"check_build", "Check the latest APK build status; downloads the", "check build"},
+        {"edit_video", "Edit a video in CapCut (or YouCut if CapCut is n", "edit video"},
+        {"edit_photo", "Edit a photo in the photo editor (Snapseed if in", "edit photo"},
+        {"remove_background", "Remove the background of a photo (professional c", "remove background"},
+        {"buy_online", "Order online on Flipkart or Amazon: opens the pr", "buy online"},
+        {"free_domain", "Get a free domain for a website: opens the free-", "free domain"},
+        {"login_website", "Log in to any website, or create a new account o", "login website"},
+        {"control_device", "Control a smart home device (light, fan, AC, swi", "control device"},
+        {"device_status", "List your smart home devices and their states (o", "device status"},
+        {"request_feature", "Ask Jarvis to add a new feature to itself: saves", "request feature"},
+        {"send_whatsapp", "Send a WhatsApp message to a contact name or num", "send whatsapp"},
+        {"send_sms", "Send an SMS.", "send sms"},
+        {"reply_notification", "Reply to a recent chat notification (WhatsApp, M", "reply notification"},
+        {"read_notifications", "Read recent notifications / incoming messages.", "read notifications"},
+        {"find_contact", "Search contacts by name and return numbers.", "find contact"},
+        {"play_youtube", "Search and play a video on YouTube.", "play youtube"},
+        {"open_url", "Open a website or deep link in the browser/app.", "open url"},
+        {"web_search", "Google search in the browser.", "web search"},
+        {"share_media_to_app", "Share/upload the latest (or nth latest) photo or", "share media to app"},
+        {"list_gallery", "List recent photos/videos in the gallery.", "list gallery"},
+        {"open_camera", "Open the camera app.", "open camera"},
+        {"media_control", "Control media playback: play, pause, next, previ", "media control"},
+        {"set_alarm", "Set an alarm.", "set alarm"},
+        {"set_timer", "Start a countdown timer.", "set timer"},
+        {"set_volume", "Set media volume 0-100 or mute.", "set volume"},
+        {"set_brightness", "Set screen brightness 0-100.", "set brightness"},
+        {"flashlight", "Turn the torch on/off.", "flashlight"},
+        {"open_settings", "Open a settings panel: wifi, bluetooth, mobile_d", "open settings"},
+        {"screen_power", "Turn screen on (wake) or off (lock), or open the", "screen power"},
+        {"record_screen", "Record the phone screen as a video (MP4, saved i", "record screen"},
+        {"lock_screen", "Lock the phone screen now using Device Admin (ne", "lock screen"},
+        {"unlock_phone", "Wake the screen and try to show Jarvis. NOTE: if", "unlock phone"},
+        {"open_browser", "Open the in-app browser on Google or a URL, rend", "open browser"},
+        {"google_search", "Google search and render the results in the Jarv", "google search"},
+        {"disco_light", "Turn the disco edge light on/off. When on, a rai", "disco light"},
+        {"upload_video", "Upload the newest gallery video in the backgroun", "upload video"},
+        {"publish_file", "Publish a workspace file to your GitHub repo (Se", "publish file"},
+        {"host_website", "Start/stop hosting your workspace website on thi", "host website"},
+        {"phone_status", "This phone's own status: battery, network, time,", "phone status"},
+        {"save_file", "Save a file (code in any language, website html/", "save file"},
+        {"read_file", "Read a file from the workspace.", "read file"},
+        {"list_files", "List files in the workspace.", "list files"},
+        {"delete_file", "Delete a workspace file.", "delete file"},
+        {"preview_html", "Open a saved HTML file (website/web app/game) in", "preview html"},
+        {"run_javascript", "Run JavaScript code and return console output/re", "run javascript"},
+        {"remember", "Save a long-term memory fact about the user.", "remember"},
+        {"forget", "Delete memories containing a keyword.", "forget"},
+        {"search_history", "Search past conversation history.", "search history"},
+        {"battery_status", "Full battery report: level, charging/discharging", "battery status"},
+        {"health_status", "Today's health summary from the phone's own sens", "health status"},
+        {"health_permissions", "Open the Health Connect permission screen so you", "health permissions"},
+        {"log_sleep", "Log last night's sleep: bed time and wake time (", "log sleep"},
+        {"log_water", "Log drinking water (e.g. '1 glass', '2 glass', '", "log water"},
+        {"wellness_status", "Show the wellness summary: last night's sleep, 7", "wellness status"},
+        {"translate", "Translate text to another language in real time ", "translate"},
+        {"translate_offline", "Translate text or a .txt/.md file OFFLINE betwee", "translate offline"},
+        {"save_password", "Save a password in the encrypted on-device vault", "save password"},
+        {"get_password", "Get a saved password from the encrypted vault so", "get password"},
+        {"list_passwords", "List the sites stored in the password vault (nam", "list passwords"},
+        {"delete_password", "Delete a saved password from the vault.", "delete password"},
+        {"add_wake_word", "Give a family member their own wake word: when t", "add wake word"},
+        {"list_wake_words", "List all family wake words and who they belong t", "list wake words"},
+        {"remove_wake_word", "Remove a family wake word.", "remove wake word"},
+        {"schedule_task", "Schedule a reminder: Jarvis notifies you at that", "schedule task"},
+        {"list_schedules", "List all scheduled reminders and routines.", "list schedules"},
+        {"list_events", "List calendar appointments: today, tomorrow, thi", "list events"},
+        {"add_event", "Add an appointment to the phone's calendar. Warn", "add event"},
+        {"daily_briefing", "Generate the daily summary: weather, today's cal", "daily briefing"},
+        {"sort_memes", "Auto-sort a meme folder: images/gifs/videos go i", "sort memes"},
+        {"focus_report", "Catch work-slacking on THIS phone: which apps we", "focus report"},
+        {"network_status", "Check whether Jarvis is online or offline right ", "network status"},
+        {"open_control_panel", "Open the phone's Control Panel (Quick Settings) ", "open control panel"},
+        {"toggle_setting", "Toggle a Control Panel setting like a human: Wi-", "toggle setting"},
+        {"set_wallpaper", "Change the phone wallpaper directly in the backg", "set wallpaper"},
+        {"schedule_message", "Automatic messaging system: schedule an SMS that", "schedule message"},
+        {"wake_screen", "Turn the phone screen ON (lock screen appears). ", "wake screen"},
+        {"backend_status", "Check the owner backend status: whether a backen", "backend status"},
+        {"verify_owner", "Face check: take a front-camera selfie and compa", "verify owner"},
+        {"save_owner_photo", "Save the owner's reference photo: takes a front-", "save owner photo"},
+        {"cancel_schedule", "Cancel a scheduled reminder or routine by its id", "cancel schedule"},
+        {"create_routine", "Create an automation routine: a trigger + an act", "create routine"},
+        {"list_routines", "List automation routines.", "list routines"},
+        {"delete_routine", "Delete a routine by its id.", "delete routine"},
+        {"security_scan", "Run an advanced security scan: screen lock, encr", "security scan"},
+        {"diagnostics", "Deep device diagnostics without root: battery, s", "diagnostics"},
+        {"troubleshoot", "Automated troubleshooting: diagnose problems and", "troubleshoot"},
+        {"sync_upload", "Sync Jarvis memory + settings to the connected G", "sync upload"},
+        {"sync_download", "Download Jarvis memory + settings from the conne", "sync download"},
+        {"backup_preferences", "Cloud backup of user preferences only (to the co", "backup preferences"},
+        {"restore_preferences", "Restore user preferences from the cloud backup.", "restore preferences"},
+        {"session_handoff", "Hand this session off to the user's other device", "session handoff"},
+        {"change_theme", "Change Jarvis accent colour/theme.", "change theme"},
+        {"resource_status", "Adaptive resource management report: battery, me", "resource status"},
+        {"clean_cache", "Clean the app cache to free memory and storage.", "clean cache"},
+        {"predict_next", "Predictive AI: what the user will probably want ", "predict next"},
+        {"check_update", "Check whether a newer Jarvis build is available ", "check update"},
+        {"check_models", "Check which Gemini AI models are available right", "check models"},
+        {"verify_integrity", "Verify the blockchain-style integrity chain: pro", "verify integrity"},
+        {"api_call", "Call any REST API (Zapier, IFTTT, Notion, Telegr", "api call"},
+        {"view_logs", "Read Jarvis's own logs: startup log + last crash", "view logs"},
+        {"self_heal", "Run the self-healing check: recover from repeate", "self heal"},
+        {"build_bundle", "Build an Android App Bundle (.aab) with Gradle o", "build bundle"},
+        {"dashboard", "Open the Jarvis dashboard: live battery, memory,", "dashboard"},
+        {"network_audit", "Audit the security of the user's OWN Wi-Fi and p", "network audit"},
+        {"export_memory", "Export the user's whole Jarvis memory (facts + c", "export memory"},
+        {"set_gesture", "Teach Jarvis what a gesture means: map the phone", "set gesture"},
+        {"delegate_task", "Delegate a task to Jarvis's background worker: i", "delegate task"},
+        {"fix_build", "Self-correcting deployment: diagnose the last fa", "fix build"},
+        {"keep_alive", "Keep Jarvis running persistently in the backgrou", "keep alive"},
     };
 
     static JList<String> featureList;
@@ -531,12 +682,18 @@ public class JarvisPC {
         }
     }
 
+    // v1.1: meye (Female) voice default - user "girls voice" cheyechilo.
+    // SelectVoiceByHints fail korle default voice-e bolbe.
     static void speak(String text) {
         try {
             if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return;
             String safe = text.replace("'", "''");
+            String gender = voiceFemale ? "Female" : "Male";
+            String ps = "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; " +
+                    "try { $s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::" + gender + ") } catch {}; " +
+                    "$s.Speak('" + safe + "')";
             new ProcessBuilder("powershell.exe", "-Command",
-                    "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('" + safe + "')")
+                    "Add-Type -AssemblyName System.Speech; " + ps)
                     .start();
         } catch (Exception ignored) {}
     }
@@ -738,15 +895,132 @@ public class JarvisPC {
                 recording = false;
                 SwingUtilities.invokeLater(() -> recordBtn.setText("🎙️ Voice record koro"));
                 byte[] wav = addWavHeader(out.toByteArray());
-                log("🎙️ Voice note phone-e pathachhi (" + (wav.length / 1024) + " KB)…");
-                sendToPhone("voice", "", Base64.getEncoder().encodeToString(wav));
-                log("✅ Voice note pathano hoyeche — phone-e beje uthbe, ar Jarvis command hisebe chalabe.");
+                if (!geminiApiKey.isEmpty()) {
+                    log("🎙️ PC AI shunchhe…");
+                    askPcAiVoice(wav);
+                } else {
+                    log("🎙️ Voice note phone-e pathachhi (" + (wav.length / 1024) + " KB)…");
+                    sendToPhone("voice", "", Base64.getEncoder().encodeToString(wav));
+                    log("✅ Voice note pathano hoyeche — phone-e beje uthbe, ar Jarvis command hisebe chalabe.");
+                }
             } catch (Exception e) {
                 recording = false;
                 SwingUtilities.invokeLater(() -> recordBtn.setText("🎙️ Voice record koro"));
                 log("Mic record hoy ni: " + e.getMessage());
             }
         }).start();
+    }
+
+    // v1.2: Connections - GitHub token + Meta/Facebook/Instagram/WhatsApp/Drive/Flipkart
+    static JPanel buildConnectionsPanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
+        JLabel h = new JLabel("🔗 Connections - GitHub, Meta, Drive, sob ekhane");
+        h.setFont(new Font("SansSerif", Font.BOLD, 13));
+        p.add(h);
+        p.add(Box.createVerticalStrut(10));
+        JPanel ghRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        ghRow.add(new JLabel("🐙 GitHub token:"));
+        JTextField ghField = new JTextField(githubToken, 22);
+        ghRow.add(ghField);
+        JButton ghSave = new JButton("Save");
+        ghSave.addActionListener(e -> {
+            githubToken = ghField.getText().trim();
+            config.put("github_token", githubToken);
+            saveConfig();
+            log(githubToken.isEmpty() ? "🐙 GitHub token muche deoa hoyeche." : "🐙 GitHub token save holo.");
+        });
+        ghRow.add(ghSave);
+        JButton ghTest = new JButton("Test");
+        ghTest.addActionListener(e -> new Thread(() -> {
+            if (githubToken.isEmpty()) { log("🐙 Age GitHub token dao (github.com > Settings > Developer settings > Personal access tokens)."); return; }
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create("https://api.github.com/user"))
+                        .header("Authorization", "Bearer " + githubToken)
+                        .header("Accept", "application/vnd.github+json")
+                        .timeout(Duration.ofSeconds(15)).GET().build();
+                HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                if (res.statusCode() == 200) log("🐙 GitHub connected: " + new JSONObject(res.body()).optString("login", "?"));
+                else log("⚠️ GitHub token kaj korche na (HTTP " + res.statusCode() + ") - token-ta check koro.");
+            } catch (Exception ex) { log("⚠️ GitHub test hoy ni: " + ex.getMessage()); }
+        }).start());
+        ghRow.add(ghTest);
+        p.add(ghRow);
+        p.add(Box.createVerticalStrut(8));
+        p.add(new JLabel("Meta / social / drive - ek click-e khulbe:"));
+        JPanel links = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+        String[][] sites = {
+            {"📘 Facebook / Meta", "https://www.facebook.com"},
+            {"📸 Instagram", "https://www.instagram.com"},
+            {"💬 WhatsApp Web", "https://web.whatsapp.com"},
+            {"☁️ Google Drive", "https://drive.google.com"},
+            {"🛒 Flipkart", "https://www.flipkart.com"},
+            {"▶️ YouTube", "https://www.youtube.com"},
+        };
+        for (String[] s2 : sites) {
+            JButton b = new JButton(s2[0]);
+            b.addActionListener(e -> openLink(s2[1]));
+            links.add(b);
+        }
+        p.add(links);
+        p.add(Box.createVerticalStrut(8));
+        JLabel note = new JLabel("PC AI GitHub token diye repo/status dekhte pare. Facebook/Meta, Drive, WhatsApp - browser-e khule login kore use koro.");
+        p.add(note);
+        return p;
+    }
+
+    static void openLink(String url) {
+        try {
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) Desktop.getDesktop().browse(new URI(url));
+        } catch (Exception e) { log("⚠️ Browser khulte parlam na: " + e.getMessage()); }
+    }
+
+    // ------------------------------------------------------------ v1.2: mobile-er moto dark orb UI
+    static final Color DARK_BG = new Color(11, 18, 32);
+    static final Color DARK_PANEL = new Color(17, 26, 46);
+    static final Color CYAN = new Color(34, 211, 238);
+    static final Color LIGHT_TEXT = new Color(226, 232, 240);
+
+    static class OrbPanel extends JPanel {
+        float pulse = 0f;
+        OrbPanel() {
+            setPreferredSize(new Dimension(84, 84));
+            setOpaque(false);
+            new javax.swing.Timer(90, e -> { pulse += 0.12f; repaint(); }).start();
+        }
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            int s = Math.min(getWidth(), getHeight()) - 8;
+            float breathe = 0.75f + 0.25f * (float) Math.sin(pulse);
+            int r = (int) (s * 0.5f * breathe);
+            int cx = getWidth() / 2, cy = getHeight() / 2;
+            java.awt.RadialGradientPaint gp = new java.awt.RadialGradientPaint(cx, cy, r,
+                    new float[]{0f, 0.6f, 1f},
+                    new Color[]{new Color(165, 243, 252), new Color(34, 211, 238), new Color(34, 211, 238, 0)});
+            g2.setPaint(gp);
+            g2.fillOval(cx - r, cy - r, r * 2, r * 2);
+            g2.setColor(Color.WHITE);
+            g2.setFont(new Font("SansSerif", Font.BOLD, 22));
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString("J", cx - fm.stringWidth("J") / 2, cy + fm.getAscent() / 2 - 2);
+            g2.dispose();
+        }
+    }
+
+    static void styleDark(Component c) {
+        if (c instanceof JPanel) c.setBackground(DARK_PANEL);
+        if (c instanceof JButton) { c.setBackground(new Color(30, 41, 66)); c.setForeground(LIGHT_TEXT); }
+        if (c instanceof JTextArea) { c.setBackground(DARK_BG); c.setForeground(LIGHT_TEXT); }
+        if (c instanceof JTextField) { c.setBackground(new Color(30, 41, 66)); c.setForeground(LIGHT_TEXT); ((JTextField) c).setCaretColor(CYAN); }
+        if (c instanceof JList) { c.setBackground(DARK_BG); c.setForeground(LIGHT_TEXT); }
+        if (c instanceof JLabel) c.setForeground(LIGHT_TEXT);
+        if (c instanceof JTabbedPane) { c.setBackground(DARK_PANEL); c.setForeground(LIGHT_TEXT); }
+        if (c instanceof JScrollPane) c.setBackground(DARK_BG);
+        if (c instanceof Container) for (Component ch : ((Container) c).getComponents()) styleDark(ch);
     }
 
     // ------------------------------------------------------------ UI
@@ -779,9 +1053,15 @@ public class JarvisPC {
         // ---- main card
         JPanel mainPanel = new JPanel(new BorderLayout(8, 8));
         mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JPanel header = new JPanel(new BorderLayout(4, 2));
+        header.add(new OrbPanel(), BorderLayout.WEST);
+        JLabel titleLabel = new JLabel("✨ JARVIS", SwingConstants.LEFT);
+        titleLabel.setFont(new Font("SansSerif", Font.BOLD, 22));
+        header.add(titleLabel, BorderLayout.CENTER);
         statusLabel = new JLabel("Paired ✅", SwingConstants.CENTER);
         statusLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-        mainPanel.add(statusLabel, BorderLayout.NORTH);
+        header.add(statusLabel, BorderLayout.SOUTH);
+        mainPanel.add(header, BorderLayout.NORTH);
 
         JPanel center = new JPanel(new BorderLayout(8, 8));
         logArea = new JTextArea();
@@ -815,6 +1095,7 @@ public class JarvisPC {
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("💬 Chat", center);
         tabs.addTab("📱 Features (" + featureModel.size() + ")", featPanel);
+        tabs.addTab("🔗 Connections", buildConnectionsPanel());
         mainPanel.add(tabs, BorderLayout.CENTER);
 
         JPanel bottom = new JPanel(new BorderLayout(6, 6));
@@ -851,6 +1132,21 @@ public class JarvisPC {
         });
         JButton unpairBtn = new JButton("🔓 Unpair");
         unpairBtn.addActionListener(e -> doUnpair());
+        JButton apiKeyBtn = new JButton(geminiApiKey.isEmpty() ? "🔑 API Key" : "🔑 API Key ✓");
+        apiKeyBtn.addActionListener(e -> {
+            setApiKey();
+            apiKeyBtn.setText(geminiApiKey.isEmpty() ? "🔑 API Key" : "🔑 API Key ✓");
+        });
+        JButton voiceGenderBtn = new JButton(voiceFemale ? "👩 Voice: Female" : "👨 Voice: Male");
+        voiceGenderBtn.addActionListener(e -> {
+            voiceFemale = !voiceFemale;
+            config.put("voice_female", voiceFemale);
+            saveConfig();
+            voiceGenderBtn.setText(voiceFemale ? "👩 Voice: Female" : "👨 Voice: Male");
+            log(voiceFemale ? "👩 Voice: Female (meye) - ekhon theke meye voice-e bolbe." : "👨 Voice: Male - ekhon theke chele voice-e bolbe.");
+        });
+        btnRow.add(apiKeyBtn);
+        btnRow.add(voiceGenderBtn);
         btnRow.add(sendBtn);
         btnRow.add(recordBtn);
         btnRow.add(screenBtn);
@@ -868,6 +1164,8 @@ public class JarvisPC {
         if (paired) cards.show(cardPanel, "main");
         else cards.show(cardPanel, "pair");
         frame.setVisible(true);
+        styleDark(cardPanel);
+        refreshAiStatus();
         log("JARVIS PC chalu. " + (paired ? "Phone pair kora ache." : "QR scan kore pair koro."));
     }
 
@@ -896,7 +1194,160 @@ public class JarvisPC {
 
     static void sendCommandText(String cmd) {
         log("💻 Tumi: " + cmd);
+        String low = cmd.toLowerCase();
+        if (low.contains("phone screen") || low.contains("mobile screen") || low.contains("phone-er screen") || low.contains("phone er screen") || low.contains("screen-e ki") || low.contains("screen e ki")) {
+            askPcAiPhoneScreen();
+            return;
+        }
+        if (isPcLocalCommand(cmd)) {
+            new Thread(() -> log(executePcCommand(cmd))).start();
+            return;
+        }
+        if (!geminiApiKey.isEmpty()) {
+            askPcAi(cmd, null);
+            return;
+        }
         new Thread(() -> sendToPhone("text", cmd, null)).start();
+    }
+
+    // ------------------------------------------------------------ v1.1: PC AI (Gemini, on-PC)
+    static final String GEMINI_MODEL = "gemini-2.5-flash";
+    static final String AI_SYSTEM = "Tumi JARVIS, Windows PC-te chola AI assistant. User-er sathe Banglish-e (Bangla+English mix) kotha bolo, chhoto ar clear uttor dao. "
+            + "Tumi PC-te cholcho, ar phone-er Jarvis-er satheo jukto acho. Jodi user phone-er kichu chay (call, SMS, WhatsApp, photo, camera, location, phone-er app/file), "
+            + "uttor-er modhye [[PHONE]] tarpor command-ta likho, jemon: [[PHONE]] battery status. Jodi user PC-er kichu chay (app kholo, type koro, click koro, run koro, shutdown, volume), "
+            + "uttor-er modhye [[PC]] tarpor command-ta likho, jemon: [[PC]] open notepad. Jodi user phone-er screen-e ki ache jante chay, uttor-e [[PHONE_SCREEN]] likho. Onno sob proshne sudhu kotha bolo, kono marker dio na.";
+
+    static boolean isPcLocalCommand(String cmd) {
+        String low = cmd.trim().toLowerCase();
+        return low.startsWith("open ") || low.startsWith("type ") || low.startsWith("click ") || low.startsWith("key ")
+                || low.startsWith("run ") || low.startsWith("say ") || low.equals("screenshot")
+                || low.startsWith("volume ") || low.equals("lock") || low.equals("shutdown") || low.equals("pc off")
+                || low.equals("turn off") || low.equals("restart") || low.equals("reboot") || low.equals("sleep")
+                || low.equals("cancel shutdown") || low.equals("abort shutdown");
+    }
+
+    static void setApiKey() {
+        String v = JOptionPane.showInputDialog(frame, "Gemini API key dao (Google AI Studio theke free-te paoa jay):", geminiApiKey);
+        if (v == null) return;
+        geminiApiKey = v.trim();
+        config.put("gemini_api_key", geminiApiKey);
+        saveConfig();
+        log(geminiApiKey.isEmpty() ? "🔑 PC AI key muche deoa hoyeche - ekhon theke sob command phone-e jabe." : "🔑 PC AI ON - ekhon theke PC-tei AI-er sathe kotha bolte parbe, voice-o cholbe.");
+        refreshAiStatus();
+    }
+
+    static void refreshAiStatus() {
+        if (statusLabel == null) return;
+        String base = statusLabel.getText();
+        int idx = base.indexOf(" • 🤖");
+        if (idx >= 0) base = base.substring(0, idx);
+        statusLabel.setText(base + " • 🤖 PC AI: " + (geminiApiKey.isEmpty() ? "OFF (🔑 key dao)" : "ON"));
+    }
+
+    static void askPcAi(String text, String audioB64) {
+        log("🤖 PC AI vabchhe…");
+        new Thread(() -> {
+            String reply = geminiChat(text, audioB64);
+            if (reply == null || reply.isBlank()) {
+                log("⚠️ PC AI uttor dilo na - key-ta thik ache kina dekho (🔑 API Key).");
+                if (text != null) sendToPhone("text", text, null);
+                return;
+            }
+            handleAiReply(reply);
+        }).start();
+    }
+
+    // v1.2: PC AI phone-er screen dekhe (Vision) - chhobi PC-te show kore na, sudhu bujhe uttor dey
+    static void askPcAiPhoneScreen() {
+        if (geminiApiKey.isEmpty()) { requestPhoneScreen(); return; }
+        log("🤖 Phone-er screen dekhchhi (na dekhiye)…");
+        new Thread(() -> {
+            sendToPhone("screen_req", "screenshot please", null);
+            sleep(4500);
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create(BASE + "/api/phone/screen?pc_id=" + enc(pcId) + "&token=" + enc(pcToken)))
+                        .timeout(Duration.ofSeconds(15)).GET().build();
+                HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+                String img = new JSONObject(res.body()).optString("image", "");
+                if (img.isEmpty()) { log("⚠️ Phone-er screen ekhono aseni - phone online ache kina dekho, abar bolo."); return; }
+                String reply = geminiChat("Phone-er screen-er ei screenshot-e ki ki dekhte pachho? Banglish-e chhoto kore bolo - app, text, notification ja ache.", null, img);
+                if (reply == null || reply.isBlank()) { log("⚠️ Phone-er screen dekhte parlam na - abar try koro."); return; }
+                handleAiReply(reply);
+            } catch (Exception e) { log("⚠️ Phone-er screen ante parlam na: " + e.getMessage()); }
+        }).start();
+    }
+
+    static void askPcAiVoice(byte[] wav) {
+        askPcAi(null, Base64.getEncoder().encodeToString(wav));
+    }
+
+    static String geminiChat(String userText, String audioB64) {
+        return geminiChat(userText, audioB64, null);
+    }
+
+    // v1.2: imageB64 dile Gemini Vision diye chhobi dekhe uttor dey (phone/PC screen)
+    static String geminiChat(String userText, String audioB64, String imageB64) {
+        try {
+            JSONArray parts = new JSONArray();
+            if (imageB64 != null) {
+                parts.put(new JSONObject().put("inline_data", new JSONObject().put("mime_type", "image/jpeg").put("data", imageB64)));
+            }
+            if (audioB64 != null) {
+                parts.put(new JSONObject().put("inline_data", new JSONObject().put("mime_type", "audio/wav").put("data", audioB64)));
+                parts.put(new JSONObject().put("text", "User voice-e bollo - shune uttor dao, Banglish-e, chhoto kore."));
+            } else {
+                parts.put(new JSONObject().put("text", userText));
+            }
+            JSONObject body = new JSONObject()
+                    .put("system_instruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", AI_SYSTEM))))
+                    .put("contents", new JSONArray().put(new JSONObject().put("parts", parts)));
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create("https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent"))
+                    .header("x-goog-api-key", geminiApiKey)
+                    .header("Content-Type", "application/json")
+                    .timeout(Duration.ofSeconds(60))
+                    .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
+                    .build();
+            HttpResponse<String> res = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() < 200 || res.statusCode() >= 300) {
+                log("⚠️ PC AI error: HTTP " + res.statusCode());
+                return null;
+            }
+            JSONObject j = new JSONObject(res.body());
+            JSONArray cands = j.optJSONArray("candidates");
+            if (cands == null || cands.length() == 0) return null;
+            JSONObject content = cands.optJSONObject(0).optJSONObject("content");
+            if (content == null) return null;
+            JSONArray ps = content.optJSONArray("parts");
+            if (ps == null || ps.length() == 0) return null;
+            return ps.optJSONObject(0).optString("text", "");
+        } catch (Exception e) {
+            log("⚠️ PC AI-er sathe connect holo na: " + e.getMessage());
+            return null;
+        }
+    }
+
+    static void handleAiReply(String reply) {
+        java.util.regex.Matcher mPhone = java.util.regex.Pattern.compile("\\[\\[PHONE\\]\\]\\s*([^\\n]+)").matcher(reply);
+        while (mPhone.find()) {
+            String cmd = mPhone.group(1).trim();
+            log("🤖 → 📱 Phone-e pathachhi: " + cmd);
+            sendToPhone("text", cmd, null);
+        }
+        java.util.regex.Matcher mPc = java.util.regex.Pattern.compile("\\[\\[PC\\]\\]\\s*([^\\n]+)").matcher(reply);
+        while (mPc.find()) {
+            String cmd = mPc.group(1).trim();
+            log(executePcCommand(cmd));
+        }
+        if (reply.contains("[[PHONE_SCREEN]]")) {
+            askPcAiPhoneScreen();
+        }
+        String clean = reply.replaceAll("\\[\\[(PHONE|PC|PHONE_SCREEN)\\]\\][^\\n]*", "").trim();
+        if (!clean.isEmpty()) {
+            log("🤖 Jarvis (PC): " + clean);
+            speak(clean.replaceAll("[*_#`]", "").replaceAll("\\n+", " "));
+        }
     }
 
     // v1.7.0: clipboard sync + file transfer (PC -> phone)
@@ -1044,6 +1495,15 @@ public class JarvisPC {
         // 3. command routing (no Robot needed for these paths)
         System.out.println("cmd unknown: " + executePcCommand("gibberish xyz").contains("bujhlam na"));
         System.out.println("cmd say: " + executePcCommand("say hello test"));
+        // 3b. v1.1 PC AI routing (no network)
+        System.out.println("route open: " + isPcLocalCommand("open notepad"));
+        System.out.println("route shutdown: " + isPcLocalCommand("shutdown"));
+        System.out.println("route battery: " + !isPcLocalCommand("battery status"));
+        String sample = "Thik ache. [[PHONE]] battery status";
+        java.util.regex.Matcher mm = java.util.regex.Pattern.compile("\\[\\[PHONE\\]\\]\\s*([^\\n]+)").matcher(sample);
+        System.out.println("marker phone: " + (mm.find() && mm.group(1).trim().equals("battery status")));
+        String clean = sample.replaceAll("\\[\\[(PHONE|PC)\\]\\][^\\n]*", "").trim();
+        System.out.println("marker clean: " + clean.equals("Thik ache."));
         // 4. network flow (SKIP when the sandbox blocks Java TCP here)
         JSONObject hb = postJson("/api/heartbeat", new JSONObject()
                 .put("install_id", "pc-test-phone").put("device_id", "d1")
